@@ -8,10 +8,14 @@ import com.spendwise.service.BudgetService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -20,6 +24,7 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/budgets")
 @RequiredArgsConstructor
+@Validated
 @Tag(name = "Budgets", description = "Monthly budget management with alerts")
 public class BudgetController {
 
@@ -39,8 +44,8 @@ public class BudgetController {
     @Operation(summary = "Get budgets for a month/year")
     public ResponseEntity<ApiResponse<List<BudgetResponse>>> getBudgets(
             @AuthenticationPrincipal UserPrincipal user,
-            @RequestParam Integer month,
-            @RequestParam Integer year) {
+            @NotNull @Min(1) @Max(12) @RequestParam Integer month,
+            @NotNull @Min(2000) @Max(2100) @RequestParam Integer year) {
         return ResponseEntity.ok(ApiResponse.success(budgetService.getBudgets(user.getId(), month, year)));
     }
 

@@ -16,6 +16,7 @@ import java.awt.*;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStreamWriter;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.text.NumberFormat;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -50,61 +51,82 @@ public class ExportService {
         int incomeCount = 0;
         int expenseCount = 0;
 
-        try (ByteArrayOutputStream out = new ByteArrayOutputStream();
-             CSVWriter writer = new CSVWriter(new OutputStreamWriter(out))) {
+        try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            // UTF-8 BOM so Excel recognizes the encoding and renders the ₹ symbol correctly.
+            out.write(0xEF);
+            out.write(0xBB);
+            out.write(0xBF);
 
-            // Header row
-            writer.writeNext(new String[]{
-                    "Date", "Type", "Category", "Amount (₹)", "Payment Method", "Description"
-            });
-
-            // Data rows
-            for (Transaction t : transactions) {
+            try (CSVWriter writer = new CSVWriter(new OutputStreamWriter(out, StandardCharsets.UTF_8))) {
+                // Header row
                 writer.writeNext(new String[]{
-                        t.getTransactionDate().format(DATE_FMT),
-                        formatType(t.getType()),
-                        t.getCategory().getName(),
-                        t.getAmount().toPlainString(),
-                        formatPaymentMethod(t.getPaymentMethod()),
-                        t.getDescription() != null ? t.getDescription() : ""
+                        "Date", "Type", "Category", "Amount (₹)", "Payment Method", "Description"
                 });
 
-                if (t.getType() == TransactionType.INCOME) {
-                    totalIncome = totalIncome.add(t.getAmount());
-                    incomeCount++;
-                } else {
-                    totalExpense = totalExpense.add(t.getAmount());
-                    expenseCount++;
+                // Data rows
+                for (Transaction t : transactions) {
+                    writer.writeNext(new String[]{
+                            t.getTransactionDate().format(DATE_FMT),
+                            formatType(t.getType()),
+                            csvSafe(t.getCategory().getName()),
+                            t.getAmount().toPlainString(),
+                            formatPaymentMethod(t.getPaymentMethod()),
+                            csvSafe(t.getDescription() != null ? t.getDescription() : "")
+                    });
+
+                    if (t.getType() == TransactionType.INCOME) {
+                        totalIncome = totalIncome.add(t.getAmount());
+                        incomeCount++;
+                    } else {
+                        totalExpense = totalExpense.add(t.getAmount());
+                        expenseCount++;
+                    }
                 }
+
+                // Blank separator row
+                writer.writeNext(new String[]{""});
+
+                // Summary rows
+                writer.writeNext(new String[]{"SUMMARY", "", "", "", "", ""});
+                writer.writeNext(new String[]{
+                        "Total Income", String.valueOf(incomeCount) + " transactions", "",
+                        totalIncome.toPlainString(), "", ""
+                });
+                writer.writeNext(new String[]{
+                        "Total Expense", String.valueOf(expenseCount) + " transactions", "",
+                        totalExpense.toPlainString(), "", ""
+                });
+                writer.writeNext(new String[]{
+                        "Net Balance", (incomeCount + expenseCount) + " total transactions", "",
+                        totalIncome.subtract(totalExpense).toPlainString(), "", ""
+                });
+                writer.writeNext(new String[]{
+                        "Period", startDate.format(DATE_FMT) + " to " + endDate.format(DATE_FMT),
+                        "", "", "", ""
+                });
             }
 
-            // Blank separator row
-            writer.writeNext(new String[]{""});
-
-            // Summary rows
-            writer.writeNext(new String[]{"SUMMARY", "", "", "", "", ""});
-            writer.writeNext(new String[]{
-                    "Total Income", String.valueOf(incomeCount) + " transactions", "",
-                    totalIncome.toPlainString(), "", ""
-            });
-            writer.writeNext(new String[]{
-                    "Total Expense", String.valueOf(expenseCount) + " transactions", "",
-                    totalExpense.toPlainString(), "", ""
-            });
-            writer.writeNext(new String[]{
-                    "Net Balance", (incomeCount + expenseCount) + " total transactions", "",
-                    totalIncome.subtract(totalExpense).toPlainString(), "", ""
-            });
-            writer.writeNext(new String[]{
-                    "Period", startDate.format(DATE_FMT) + " to " + endDate.format(DATE_FMT),
-                    "", "", "", ""
-            });
-
-            writer.flush();
             return out.toByteArray();
         } catch (Exception e) {
             throw new RuntimeException("Failed to export CSV", e);
         }
+    }
+
+    /**
+     * Prefixes a value with a single quote if it starts with a character that
+     * spreadsheet software (Excel, Sheets) would interpret as a formula
+     * (=, +, -, @) or that could break out of a cell (tab, CR). Without this,
+     * a category or description imported from user data could execute a
+     * formula — e.g. a HYPERLINK() call — when the export is reopened.
+     */
+    private String csvSafe(String value) {
+        if (value == null || value.isEmpty()) return value;
+        char first = value.charAt(0);
+        if (first == '=' || first == '+' || first == '-' || first == '@'
+                || first == '\t' || first == '\r') {
+            return "'" + value;
+        }
+        return value;
     }
 
     // ========== PDF EXPORT ==========

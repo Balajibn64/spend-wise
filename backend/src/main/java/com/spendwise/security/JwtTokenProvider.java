@@ -13,6 +13,9 @@ import java.util.UUID;
 @Component
 public class JwtTokenProvider {
 
+    public static final String TYPE_ACCESS = "access";
+    public static final String TYPE_REFRESH = "refresh";
+
     private final SecretKey key;
     private final long accessTokenExpiration;
     private final long refreshTokenExpiration;
@@ -26,42 +29,72 @@ public class JwtTokenProvider {
         this.refreshTokenExpiration = refreshTokenExpiration;
     }
 
+    public long getRefreshTokenExpirationMillis() {
+        return refreshTokenExpiration;
+    }
+
     public String generateAccessToken(UUID userId, String email) {
-        return buildToken(userId, email, accessTokenExpiration);
-    }
-
-    public String generateRefreshToken(UUID userId, String email) {
-        return buildToken(userId, email, refreshTokenExpiration);
-    }
-
-    private String buildToken(UUID userId, String email, long expiration) {
         Date now = new Date();
-        Date expiryDate = new Date(now.getTime() + expiration);
-
         return Jwts.builder()
                 .subject(userId.toString())
                 .claim("email", email)
+                .claim("typ", TYPE_ACCESS)
                 .issuedAt(now)
-                .expiration(expiryDate)
+                .expiration(new Date(now.getTime() + accessTokenExpiration))
+                .signWith(key)
+                .compact();
+    }
+
+    /**
+     * Builds a refresh token whose jti is the given id — the caller persists a
+     * matching {@code RefreshToken} row under that same id, so the token can
+     * be looked up and revoked (logout, rotation) independently of whether it
+     * is still cryptographically valid.
+     */
+    public String generateRefreshToken(UUID userId, String email, UUID jti) {
+        Date now = new Date();
+        return Jwts.builder()
+                .subject(userId.toString())
+                .claim("email", email)
+                .claim("typ", TYPE_REFRESH)
+                .id(jti.toString())
+                .issuedAt(now)
+                .expiration(new Date(now.getTime() + refreshTokenExpiration))
                 .signWith(key)
                 .compact();
     }
 
     public UUID getUserIdFromToken(String token) {
-        Claims claims = Jwts.parser()
-                .verifyWith(key)
-                .build()
-                .parseSignedClaims(token)
-                .getPayload();
-        return UUID.fromString(claims.getSubject());
+        return UUID.fromString(parse(token).getSubject());
+    }
+
+    public UUID getJtiFromToken(String token) {
+        String jti = parse(token).getId();
+        return jti != null ? UUID.fromString(jti) : null;
+    }
+
+    public boolean isAccessToken(String token) {
+        return TYPE_ACCESS.equals(parse(token).get("typ", String.class));
+    }
+
+    public boolean isRefreshToken(String token) {
+        return TYPE_REFRESH.equals(parse(token).get("typ", String.class));
     }
 
     public boolean validateToken(String token) {
         try {
-            Jwts.parser().verifyWith(key).build().parseSignedClaims(token);
+            parse(token);
             return true;
         } catch (JwtException | IllegalArgumentException e) {
             return false;
         }
+    }
+
+    private Claims parse(String token) {
+        return Jwts.parser()
+                .verifyWith(key)
+                .build()
+                .parseSignedClaims(token)
+                .getPayload();
     }
 }

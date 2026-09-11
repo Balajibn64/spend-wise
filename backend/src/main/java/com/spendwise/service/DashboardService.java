@@ -30,6 +30,13 @@ public class DashboardService {
         BigDecimal totalExpense = transactionRepository.sumByUserAndTypeAndDateRange(
                 userId, TransactionType.EXPENSE, start, end);
 
+        // Running balance: all income/expense up to and including this month, so a
+        // month's ending balance carries forward as next month's starting point.
+        BigDecimal cumulativeIncome = transactionRepository.sumByUserAndTypeUpTo(
+                userId, TransactionType.INCOME, end);
+        BigDecimal cumulativeExpense = transactionRepository.sumByUserAndTypeUpTo(
+                userId, TransactionType.EXPENSE, end);
+
         List<DashboardResponse.CategoryBreakdown> categoryBreakdown = buildCategoryBreakdown(
                 userId, TransactionType.EXPENSE, start, end);
 
@@ -40,14 +47,37 @@ public class DashboardService {
         List<DashboardResponse.PaymentMethodBreakdown> paymentMethodDist = buildPaymentMethodDistribution(
                 userId, start, end);
 
+        List<DashboardResponse.DailySpending> dailySpending = buildDailySpending(userId, start, end);
+
         return DashboardResponse.builder()
                 .totalIncome(totalIncome)
                 .totalExpense(totalExpense)
-                .balance(totalIncome.subtract(totalExpense))
+                .balance(cumulativeIncome.subtract(cumulativeExpense))
                 .categoryBreakdown(categoryBreakdown)
                 .monthlyComparison(monthlyComparison)
                 .paymentMethodDistribution(paymentMethodDist)
+                .dailySpending(dailySpending)
                 .build();
+    }
+
+    private List<DashboardResponse.DailySpending> buildDailySpending(
+            UUID userId, LocalDate start, LocalDate end) {
+        List<Object[]> data = transactionRepository.getDailyTotals(
+                userId, TransactionType.EXPENSE, start, end);
+
+        Map<Integer, BigDecimal> byDay = new HashMap<>();
+        for (Object[] row : data) {
+            byDay.put(((Number) row[0]).intValue(), (BigDecimal) row[1]);
+        }
+
+        List<DashboardResponse.DailySpending> result = new ArrayList<>();
+        for (int day = 1; day <= end.getDayOfMonth(); day++) {
+            result.add(DashboardResponse.DailySpending.builder()
+                    .day(day)
+                    .amount(byDay.getOrDefault(day, BigDecimal.ZERO))
+                    .build());
+        }
+        return result;
     }
 
     private List<DashboardResponse.CategoryBreakdown> buildCategoryBreakdown(
@@ -77,20 +107,27 @@ public class DashboardService {
             UUID userId, LocalDate start, LocalDate end) {
         List<Object[]> data = transactionRepository.getMonthlyComparison(userId, start, end);
 
+        // Pre-populate every month in the range, in order, so a month with no
+        // transactions still appears (zero-filled) instead of vanishing from
+        // the chart entirely.
         Map<String, BigDecimal[]> monthMap = new LinkedHashMap<>();
+        for (LocalDate cursor = start.withDayOfMonth(1); !cursor.isAfter(end); cursor = cursor.plusMonths(1)) {
+            monthMap.put(monthKey(cursor.getMonthValue(), cursor.getYear()), new BigDecimal[]{BigDecimal.ZERO, BigDecimal.ZERO});
+        }
+
         for (Object[] row : data) {
             int m = ((Number) row[0]).intValue();
             int y = ((Number) row[1]).intValue();
             TransactionType type = (TransactionType) row[2];
             BigDecimal amount = (BigDecimal) row[3];
 
-            String key = Month.of(m).getDisplayName(TextStyle.SHORT, Locale.ENGLISH) + " " + y;
-            monthMap.computeIfAbsent(key, k -> new BigDecimal[]{BigDecimal.ZERO, BigDecimal.ZERO});
+            String key = monthKey(m, y);
+            BigDecimal[] slot = monthMap.computeIfAbsent(key, k -> new BigDecimal[]{BigDecimal.ZERO, BigDecimal.ZERO});
 
             if (type == TransactionType.INCOME) {
-                monthMap.get(key)[0] = amount;
+                slot[0] = amount;
             } else {
-                monthMap.get(key)[1] = amount;
+                slot[1] = amount;
             }
         }
 
@@ -101,6 +138,10 @@ public class DashboardService {
                         .expense(e.getValue()[1])
                         .build())
                 .toList();
+    }
+
+    private String monthKey(int month, int year) {
+        return Month.of(month).getDisplayName(TextStyle.SHORT, Locale.ENGLISH) + " " + year;
     }
 
     private List<DashboardResponse.PaymentMethodBreakdown> buildPaymentMethodDistribution(

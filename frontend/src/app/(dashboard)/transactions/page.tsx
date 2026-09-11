@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, memo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Plus, Pencil, Trash2, Download, Filter, Search } from "lucide-react";
+import { Plus, Pencil, Trash2, Download, Upload, Filter, Search } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -16,13 +16,24 @@ import {
   fetchCategories,
   exportCsv,
   exportPdf,
+  importTransactions,
+  invalidateAfterTransactionChange,
 } from "@/lib/queries";
+import { getApiErrorMessage } from "@/lib/api-error";
+import {
+  PAYMENT_METHODS,
+  PAYMENT_METHOD_LABELS,
+  formatINR,
+  formatDate,
+  todayLocalDateString,
+} from "@/lib/format";
 import type {
   Transaction,
   TransactionRequest,
   Category,
   TransactionType,
   PaymentMethod,
+  ImportResult,
 } from "@/types";
 
 import {
@@ -58,24 +69,6 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-const PAYMENT_METHODS: PaymentMethod[] = [
-  "CASH",
-  "UPI",
-  "DEBIT_CARD",
-  "CREDIT_CARD",
-  "NET_BANKING",
-  "WALLET",
-];
-
-const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
-  CASH: "Cash",
-  UPI: "UPI",
-  DEBIT_CARD: "Debit Card",
-  CREDIT_CARD: "Credit Card",
-  NET_BANKING: "Net Banking",
-  WALLET: "Wallet",
-};
-
 const PAGE_SIZE = 10;
 
 /* ------------------------------------------------------------------ */
@@ -100,25 +93,71 @@ const transactionSchema = z.object({
 
 type TransactionFormValues = z.infer<typeof transactionSchema>;
 
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                            */
-/* ------------------------------------------------------------------ */
-
-function formatINR(value: number): string {
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    maximumFractionDigits: 2,
-  }).format(value);
-}
-
-function formatDate(dateStr: string): string {
-  return new Date(dateStr).toLocaleDateString("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
-}
+const TransactionRow = memo(function TransactionRow({
+  txn,
+  onEdit,
+  onDelete,
+}: {
+  txn: Transaction;
+  onEdit: (txn: Transaction) => void;
+  onDelete: (id: string) => void;
+}) {
+  return (
+    <TableRow className="border-violet-200 dark:border-violet-800 hover:bg-violet-50/30 dark:hover:bg-violet-900/20">
+      <TableCell className="text-sm text-gray-700 dark:text-gray-300">
+        {formatDate(txn.transactionDate)}
+      </TableCell>
+      <TableCell>
+        <span className="text-sm font-medium text-violet-800 dark:text-violet-200">
+          {txn.categoryName ?? "—"}
+        </span>
+      </TableCell>
+      <TableCell>
+        <span
+          className={`text-sm font-semibold ${
+            txn.type === "INCOME"
+              ? "text-green-600 dark:text-green-400"
+              : "text-red-600 dark:text-red-400"
+          }`}
+        >
+          {txn.type === "INCOME" ? "+" : "-"}
+          {formatINR(txn.amount)}
+        </span>
+      </TableCell>
+      <TableCell>
+        <Badge
+          variant="secondary"
+          className="bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300"
+        >
+          {PAYMENT_METHOD_LABELS[txn.paymentMethod as PaymentMethod] ?? txn.paymentMethod}
+        </Badge>
+      </TableCell>
+      <TableCell className="max-w-[200px] truncate text-sm text-gray-500 dark:text-gray-400">
+        {txn.description || "—"}
+      </TableCell>
+      <TableCell className="text-right">
+        <div className="flex items-center justify-end gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-violet-600 hover:bg-violet-100 hover:text-violet-800 dark:text-violet-400 dark:hover:bg-violet-900/30 dark:hover:text-violet-200"
+            onClick={() => onEdit(txn)}
+          >
+            <Pencil className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-red-500 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-900/30 dark:hover:text-red-300"
+            onClick={() => onDelete(String(txn.id))}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+      </TableCell>
+    </TableRow>
+  );
+});
 
 /* ------------------------------------------------------------------ */
 /*  Page component                                                     */
@@ -141,6 +180,11 @@ export default function TransactionsPage() {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
+  /* ---- import state ---- */
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const [importResultOpen, setImportResultOpen] = useState(false);
+
   /* ---- react-hook-form ---- */
   const form = useForm<TransactionFormValues>({
     resolver: zodResolver(transactionSchema),
@@ -150,7 +194,7 @@ export default function TransactionsPage() {
       amount: 0,
       paymentMethod: "CASH",
       description: "",
-      transactionDate: new Date().toISOString().split("T")[0],
+      transactionDate: todayLocalDateString(),
     },
   });
 
@@ -184,23 +228,30 @@ export default function TransactionsPage() {
   });
 
   /* Derived: categories filtered by selected type (for form) */
-  const filteredCategories: Category[] = (categoriesQuery.data ?? []).filter(
-    (c: Category) => c.type === watchedType
+  const filteredCategories: Category[] = useMemo(
+    () => (categoriesQuery.data ?? []).filter((c: Category) => c.type === watchedType),
+    [categoriesQuery.data, watchedType]
   );
 
-  /* All categories for the top-level filter */
-  const allCategories: Category[] = categoriesQuery.data ?? [];
+  /* All categories for the top-level filter, matching the currently selected type */
+  const allCategories: Category[] = useMemo(
+    () =>
+      (categoriesQuery.data ?? []).filter(
+        (c: Category) => typeFilter === "ALL" || c.type === typeFilter
+      ),
+    [categoriesQuery.data, typeFilter]
+  );
 
   /* ---- mutations ---- */
   const createMutation = useMutation({
     mutationFn: createTransaction,
     onSuccess: () => {
       toast.success("Transaction created successfully");
-      queryClient.invalidateQueries({ queryKey: ["transactions"] });
+      invalidateAfterTransactionChange(queryClient);
       closeDialog();
     },
-    onError: () => {
-      toast.error("Failed to create transaction");
+    onError: (error) => {
+      toast.error(getApiErrorMessage(error, "Failed to create transaction"));
     },
   });
 
@@ -214,11 +265,11 @@ export default function TransactionsPage() {
     }) => updateTransaction(id, data),
     onSuccess: () => {
       toast.success("Transaction updated successfully");
-      queryClient.invalidateQueries({ queryKey: ["transactions"] });
+      invalidateAfterTransactionChange(queryClient);
       closeDialog();
     },
-    onError: () => {
-      toast.error("Failed to update transaction");
+    onError: (error) => {
+      toast.error(getApiErrorMessage(error, "Failed to update transaction"));
     },
   });
 
@@ -226,12 +277,36 @@ export default function TransactionsPage() {
     mutationFn: deleteTransaction,
     onSuccess: () => {
       toast.success("Transaction deleted successfully");
-      queryClient.invalidateQueries({ queryKey: ["transactions"] });
+      invalidateAfterTransactionChange(queryClient);
     },
-    onError: () => {
-      toast.error("Failed to delete transaction");
+    onError: (error) => {
+      toast.error(getApiErrorMessage(error, "Failed to delete transaction"));
     },
   });
+
+  const importMutation = useMutation({
+    mutationFn: importTransactions,
+    onSuccess: (result) => {
+      setImportResult(result);
+      setImportResultOpen(true);
+      invalidateAfterTransactionChange(queryClient);
+      queryClient.invalidateQueries({ queryKey: ["categories"] });
+      if (result.imported > 0) {
+        toast.success(
+          `Imported ${result.imported} transaction${result.imported === 1 ? "" : "s"}`
+        );
+      } else {
+        toast.error("No transactions were imported");
+      }
+    },
+    onError: (error) => toast.error(getApiErrorMessage(error, "Failed to import file")),
+  });
+
+  function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) importMutation.mutate(file);
+    e.target.value = "";
+  }
 
   /* ---- dialog helpers ---- */
   function openCreateDialog() {
@@ -242,25 +317,28 @@ export default function TransactionsPage() {
       amount: 0,
       paymentMethod: "CASH",
       description: "",
-      transactionDate: new Date().toISOString().split("T")[0],
+      transactionDate: todayLocalDateString(),
     });
     setDialogOpen(true);
   }
 
-  function openEditDialog(transaction: Transaction) {
-    setEditingTransaction(transaction);
-    form.reset({
-      type: transaction.type as "INCOME" | "EXPENSE",
-      categoryId: String(transaction.categoryId ?? ""),
-      amount: transaction.amount,
-      paymentMethod: transaction.paymentMethod as PaymentMethod,
-      description: transaction.description ?? "",
-      transactionDate: transaction.transactionDate
-        ? transaction.transactionDate.split("T")[0]
-        : new Date().toISOString().split("T")[0],
-    });
-    setDialogOpen(true);
-  }
+  const openEditDialog = useCallback(
+    (transaction: Transaction) => {
+      setEditingTransaction(transaction);
+      form.reset({
+        type: transaction.type as "INCOME" | "EXPENSE",
+        categoryId: String(transaction.categoryId ?? ""),
+        amount: transaction.amount,
+        paymentMethod: transaction.paymentMethod as PaymentMethod,
+        description: transaction.description ?? "",
+        transactionDate: transaction.transactionDate
+          ? transaction.transactionDate.split("T")[0]
+          : todayLocalDateString(),
+      });
+      setDialogOpen(true);
+    },
+    [form]
+  );
 
   function closeDialog() {
     setDialogOpen(false);
@@ -291,8 +369,8 @@ export default function TransactionsPage() {
     try {
       await exportCsv(startDate || "", endDate || "");
       toast.success("CSV exported successfully");
-    } catch {
-      toast.error("Failed to export CSV");
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, "Failed to export CSV"));
     }
   }
 
@@ -300,16 +378,16 @@ export default function TransactionsPage() {
     try {
       await exportPdf(startDate || "", endDate || "");
       toast.success("PDF exported successfully");
-    } catch {
-      toast.error("Failed to export PDF");
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, "Failed to export PDF"));
     }
   }
 
   /* ---- delete handler ---- */
-  function handleDelete(id: string) {
+  const handleDelete = useCallback((id: string) => {
     setDeletingId(id);
     setDeleteConfirmOpen(true);
-  }
+  }, []);
 
   function confirmDelete() {
     if (deletingId) {
@@ -318,11 +396,6 @@ export default function TransactionsPage() {
     setDeleteConfirmOpen(false);
     setDeletingId(null);
   }
-
-  /* ---- reset category form field when type changes ---- */
-  useEffect(() => {
-    form.setValue("categoryId", "");
-  }, [watchedType, form]);
 
   /* ---- pagination helpers ---- */
   const transactions: Transaction[] =
@@ -349,8 +422,25 @@ export default function TransactionsPage() {
           </p>
         </div>
 
-        {/* Export buttons */}
+        {/* Import / Export buttons */}
         <div className="flex items-center gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            className="hidden"
+            onChange={handleFileSelected}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={importMutation.isPending}
+            onClick={() => fileInputRef.current?.click()}
+            className="border-violet-300 text-violet-700 hover:bg-violet-50 dark:border-violet-700 dark:text-violet-300 dark:hover:bg-violet-900/30"
+          >
+            <Upload className="mr-2 h-4 w-4" />
+            {importMutation.isPending ? "Importing..." : "Import"}
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -415,6 +505,9 @@ export default function TransactionsPage() {
               value={typeFilter}
               onValueChange={(val) => {
                 setTypeFilter(val);
+                // A category from the other type would no longer be in the
+                // list below, and would silently filter out every result.
+                setCategoryFilter("ALL");
                 setPage(0);
               }}
             >
@@ -500,64 +593,12 @@ export default function TransactionsPage() {
               </TableHeader>
               <TableBody>
                 {transactions.map((txn) => (
-                  <TableRow
+                  <TransactionRow
                     key={txn.id}
-                    className="border-violet-200 dark:border-violet-800 hover:bg-violet-50/30 dark:hover:bg-violet-900/20"
-                  >
-                    <TableCell className="text-sm text-gray-700 dark:text-gray-300">
-                      {formatDate(txn.transactionDate)}
-                    </TableCell>
-                    <TableCell>
-                      <span className="text-sm font-medium text-violet-800 dark:text-violet-200">
-                        {txn.categoryName ?? "—"}
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <span
-                        className={`text-sm font-semibold ${
-                          txn.type === "INCOME"
-                            ? "text-green-600 dark:text-green-400"
-                            : "text-red-600 dark:text-red-400"
-                        }`}
-                      >
-                        {txn.type === "INCOME" ? "+" : "-"}
-                        {formatINR(txn.amount)}
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant="secondary"
-                        className="bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300"
-                      >
-                        {PAYMENT_METHOD_LABELS[
-                          txn.paymentMethod as PaymentMethod
-                        ] ?? txn.paymentMethod}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="max-w-[200px] truncate text-sm text-gray-500 dark:text-gray-400">
-                      {txn.description || "—"}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-violet-600 hover:bg-violet-100 hover:text-violet-800 dark:text-violet-400 dark:hover:bg-violet-900/30 dark:hover:text-violet-200"
-                          onClick={() => openEditDialog(txn)}
-                        >
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-red-500 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-900/30 dark:hover:text-red-300"
-                          onClick={() => handleDelete(String(txn.id))}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
+                    txn={txn}
+                    onEdit={openEditDialog}
+                    onDelete={handleDelete}
+                  />
                 ))}
               </TableBody>
             </Table>
@@ -706,7 +747,12 @@ export default function TransactionsPage() {
                 render={({ field }) => (
                   <Select
                     value={field.value}
-                    onValueChange={field.onChange}
+                    onValueChange={(val) => {
+                      field.onChange(val);
+                      // The category list depends on type, so a category
+                      // picked under the old type would no longer be valid.
+                      form.setValue("categoryId", "");
+                    }}
                   >
                     <SelectTrigger className="border-violet-200 dark:border-violet-700 focus:ring-violet-500">
                       <SelectValue placeholder="Select type" />
@@ -877,6 +923,66 @@ export default function TransactionsPage() {
         confirmLabel="Delete"
         onConfirm={confirmDelete}
       />
+
+      {/* ---- Import Result ---- */}
+      <Dialog open={importResultOpen} onOpenChange={setImportResultOpen}>
+        <DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-violet-900 dark:text-violet-200">
+              Import Complete
+            </DialogTitle>
+            <DialogDescription className="text-violet-600 dark:text-violet-400">
+              {importResult?.imported ?? 0} transaction
+              {importResult?.imported === 1 ? "" : "s"} imported
+              {importResult && importResult.skipped > 0
+                ? `, ${importResult.skipped} row${importResult.skipped === 1 ? "" : "s"} skipped`
+                : ""}
+              .
+            </DialogDescription>
+          </DialogHeader>
+
+          {importResult && importResult.categoriesCreated.length > 0 && (
+            <div>
+              <p className="mb-1 text-sm font-medium text-violet-800 dark:text-violet-200">
+                New categories created
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {importResult.categoriesCreated.map((name) => (
+                  <Badge
+                    key={name}
+                    variant="secondary"
+                    className="bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300"
+                  >
+                    {name}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {importResult && importResult.errors.length > 0 && (
+            <div>
+              <p className="mb-1 text-sm font-medium text-red-600 dark:text-red-400">
+                Skipped rows
+              </p>
+              <ul className="max-h-40 space-y-1 overflow-y-auto text-xs text-muted-foreground">
+                {importResult.errors.map((err, i) => (
+                  <li key={i}>{err}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button
+              onClick={() => setImportResultOpen(false)}
+              className="bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:from-violet-700 hover:to-purple-700"
+            >
+              Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

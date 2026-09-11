@@ -30,8 +30,7 @@ public class RecurringTransactionService {
     public RecurringTransactionResponse create(UUID userId, RecurringTransactionRequest request) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("User", "id", userId));
-        Category category = categoryRepository.findById(request.getCategoryId())
-                .orElseThrow(() -> new ResourceNotFoundException("Category", "id", request.getCategoryId()));
+        Category category = findOwnedCategory(userId, request.getCategoryId());
 
         validateCategoryType(category, request.getType());
 
@@ -61,16 +60,10 @@ public class RecurringTransactionService {
 
     @Transactional
     public RecurringTransactionResponse update(UUID userId, UUID id, RecurringTransactionRequest request) {
-        RecurringTransaction rt = recurringTransactionRepository.findById(id)
+        RecurringTransaction rt = recurringTransactionRepository.findByIdAndUserId(id, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("RecurringTransaction", "id", id));
 
-        if (!rt.getUser().getId().equals(userId)) {
-            throw new ResourceNotFoundException("RecurringTransaction", "id", id);
-        }
-
-        Category category = categoryRepository.findById(request.getCategoryId())
-                .orElseThrow(() -> new ResourceNotFoundException("Category", "id", request.getCategoryId()));
-
+        Category category = findOwnedCategory(userId, request.getCategoryId());
         validateCategoryType(category, request.getType());
 
         rt.setCategory(category);
@@ -88,12 +81,8 @@ public class RecurringTransactionService {
 
     @Transactional
     public void toggleActive(UUID userId, UUID id) {
-        RecurringTransaction rt = recurringTransactionRepository.findById(id)
+        RecurringTransaction rt = recurringTransactionRepository.findByIdAndUserId(id, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("RecurringTransaction", "id", id));
-
-        if (!rt.getUser().getId().equals(userId)) {
-            throw new ResourceNotFoundException("RecurringTransaction", "id", id);
-        }
 
         rt.setIsActive(!rt.getIsActive());
         recurringTransactionRepository.save(rt);
@@ -101,14 +90,15 @@ public class RecurringTransactionService {
 
     @Transactional
     public void delete(UUID userId, UUID id) {
-        RecurringTransaction rt = recurringTransactionRepository.findById(id)
+        RecurringTransaction rt = recurringTransactionRepository.findByIdAndUserId(id, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("RecurringTransaction", "id", id));
 
-        if (!rt.getUser().getId().equals(userId)) {
-            throw new ResourceNotFoundException("RecurringTransaction", "id", id);
-        }
-
         recurringTransactionRepository.delete(rt);
+    }
+
+    private Category findOwnedCategory(UUID userId, Long categoryId) {
+        return categoryRepository.findByIdVisibleToUser(categoryId, userId)
+                .orElseThrow(() -> new ResourceNotFoundException("Category", "id", categoryId));
     }
 
     private void validateCategoryType(Category category, TransactionType requestType) {

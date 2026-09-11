@@ -1,9 +1,25 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import api from "@/lib/api";
 import type { User, ApiResponse, AuthResponse } from "@/types";
+
+// Reads localStorage before the browser paints (avoids a visible loading
+// flash) while staying a no-op on the server, since useLayoutEffect warns
+// there.
+const useIsomorphicLayoutEffect =
+  typeof window !== "undefined" ? useLayoutEffect : useEffect;
+
+const SESSION_COOKIE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60; // matches the backend refresh-token lifetime
+
+function setSessionCookie() {
+  document.cookie = `sw_session=1; path=/; max-age=${SESSION_COOKIE_MAX_AGE_SECONDS}; SameSite=Lax`;
+}
+
+function clearSessionCookie() {
+  document.cookie = "sw_session=; path=/; max-age=0; SameSite=Lax";
+}
 
 interface AuthContextType {
   user: User | null;
@@ -20,7 +36,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const router = useRouter();
 
-  useEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     try {
       const storedUser = localStorage.getItem("user");
       const token = localStorage.getItem("accessToken");
@@ -30,7 +46,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // Corrupted localStorage — clear and start fresh
       localStorage.removeItem("accessToken");
-      localStorage.removeItem("refreshToken");
       localStorage.removeItem("user");
     }
     setLoading(false);
@@ -41,10 +56,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       "/api/auth/login",
       { email, password }
     );
-    const { accessToken, refreshToken, user: userData } = data.data;
+    const { accessToken, user: userData } = data.data;
     localStorage.setItem("accessToken", accessToken);
-    localStorage.setItem("refreshToken", refreshToken);
     localStorage.setItem("user", JSON.stringify(userData));
+    setSessionCookie();
     setUser(userData);
     router.push("/dashboard");
   };
@@ -54,18 +69,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       "/api/auth/signup",
       { name, email, password }
     );
-    const { accessToken, refreshToken, user: userData } = data.data;
+    const { accessToken, user: userData } = data.data;
     localStorage.setItem("accessToken", accessToken);
-    localStorage.setItem("refreshToken", refreshToken);
     localStorage.setItem("user", JSON.stringify(userData));
+    setSessionCookie();
     setUser(userData);
     router.push("/dashboard");
   };
 
   const logout = () => {
+    // Best-effort: revokes the refresh token and clears its cookie
+    // server-side. Fired without awaiting so the UI doesn't wait on it.
+    api.post("/api/auth/logout").catch(() => {});
     localStorage.removeItem("accessToken");
-    localStorage.removeItem("refreshToken");
     localStorage.removeItem("user");
+    clearSessionCookie();
     setUser(null);
     router.push("/login");
   };

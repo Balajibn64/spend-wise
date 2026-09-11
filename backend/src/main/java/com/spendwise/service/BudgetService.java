@@ -18,7 +18,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -40,7 +42,7 @@ public class BudgetService {
 
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("User", "id", userId));
-        Category category = categoryRepository.findById(request.getCategoryId())
+        Category category = categoryRepository.findByIdVisibleToUser(request.getCategoryId(), userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Category", "id", request.getCategoryId()));
 
         Budget budget = Budget.builder()
@@ -59,22 +61,17 @@ public class BudgetService {
     @Transactional(readOnly = true)
     public List<BudgetResponse> getBudgets(UUID userId, Integer month, Integer year) {
         List<Budget> budgets = budgetRepository.findByUserIdAndMonthAndYear(userId, month, year);
+        Map<Long, BigDecimal> spentByCategory = getSpentAmountsByCategory(userId, month, year);
         return budgets.stream()
-                .map(budget -> {
-                    BigDecimal spent = getSpentAmount(userId, budget.getCategory().getId(), month, year);
-                    return BudgetResponse.from(budget, spent);
-                })
+                .map(budget -> BudgetResponse.from(
+                        budget, spentByCategory.getOrDefault(budget.getCategory().getId(), BigDecimal.ZERO)))
                 .toList();
     }
 
     @Transactional
     public BudgetResponse updateBudget(UUID userId, UUID budgetId, BudgetRequest request) {
-        Budget budget = budgetRepository.findById(budgetId)
+        Budget budget = budgetRepository.findByIdAndUserId(budgetId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Budget", "id", budgetId));
-
-        if (!budget.getUser().getId().equals(userId)) {
-            throw new ResourceNotFoundException("Budget", "id", budgetId);
-        }
 
         // Check for duplicate if category/month/year changed
         Optional<Budget> existing = budgetRepository.findByUserIdAndCategoryIdAndMonthAndYear(
@@ -83,7 +80,7 @@ public class BudgetService {
             throw new DuplicateResourceException("Budget already exists for this category and month");
         }
 
-        Category category = categoryRepository.findById(request.getCategoryId())
+        Category category = categoryRepository.findByIdVisibleToUser(request.getCategoryId(), userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Category", "id", request.getCategoryId()));
 
         budget.setCategory(category);
@@ -98,12 +95,8 @@ public class BudgetService {
 
     @Transactional
     public void deleteBudget(UUID userId, UUID budgetId) {
-        Budget budget = budgetRepository.findById(budgetId)
+        Budget budget = budgetRepository.findByIdAndUserId(budgetId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Budget", "id", budgetId));
-
-        if (!budget.getUser().getId().equals(userId)) {
-            throw new ResourceNotFoundException("Budget", "id", budgetId);
-        }
         budgetRepository.delete(budget);
     }
 
@@ -112,5 +105,19 @@ public class BudgetService {
         LocalDate end = start.withDayOfMonth(start.lengthOfMonth());
         return transactionRepository.sumByUserAndCategoryAndDateRange(
                 userId, categoryId, TransactionType.EXPENSE, start, end);
+    }
+
+    /** One grouped query for the whole month, instead of one aggregate query per budget. */
+    private Map<Long, BigDecimal> getSpentAmountsByCategory(UUID userId, Integer month, Integer year) {
+        LocalDate start = LocalDate.of(year, month, 1);
+        LocalDate end = start.withDayOfMonth(start.lengthOfMonth());
+        List<Object[]> rows = transactionRepository.sumByUserAndTypeAndDateRangeGroupedByCategory(
+                userId, TransactionType.EXPENSE, start, end);
+
+        Map<Long, BigDecimal> result = new HashMap<>();
+        for (Object[] row : rows) {
+            result.put((Long) row[0], (BigDecimal) row[1]);
+        }
+        return result;
     }
 }

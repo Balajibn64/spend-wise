@@ -6,6 +6,9 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 const api = axios.create({
   baseURL: API_BASE,
   headers: { "Content-Type": "application/json" },
+  // The refresh token now lives in an HttpOnly cookie set by the backend;
+  // this makes the browser actually send/receive it.
+  withCredentials: true,
 });
 
 // Auth endpoints that should NOT trigger token refresh on 401
@@ -20,6 +23,28 @@ api.interceptors.request.use((config) => {
   }
   return config;
 });
+
+// Shared across all concurrent 401s: the first one starts the refresh, every
+// other request awaits the same promise instead of each firing its own
+// refresh call (which used to race and, once refresh tokens rotate/expire on
+// first use, would log the user out unpredictably).
+let refreshPromise: Promise<string> | null = null;
+
+function performRefresh(): Promise<string> {
+  if (!refreshPromise) {
+    refreshPromise = axios
+      .post<ApiResponse<AuthResponse>>(`${API_BASE}/api/auth/refresh`, {}, { withCredentials: true })
+      .then(({ data }) => {
+        const accessToken = data.data.accessToken;
+        localStorage.setItem("accessToken", accessToken);
+        return accessToken;
+      })
+      .finally(() => {
+        refreshPromise = null;
+      });
+  }
+  return refreshPromise;
+}
 
 api.interceptors.response.use(
   (response) => response,
@@ -37,23 +62,11 @@ api.interceptors.response.use(
       originalRequest._retry = true;
 
       try {
-        const refreshToken = localStorage.getItem("refreshToken");
-        if (!refreshToken) throw new Error("No refresh token");
-
-        const { data } = await axios.post<ApiResponse<AuthResponse>>(
-          `${API_BASE}/api/auth/refresh`,
-          { refreshToken }
-        );
-
-        const { accessToken, refreshToken: newRefreshToken } = data.data;
-        localStorage.setItem("accessToken", accessToken);
-        localStorage.setItem("refreshToken", newRefreshToken);
-
+        const accessToken = await performRefresh();
         originalRequest.headers.Authorization = `Bearer ${accessToken}`;
         return api(originalRequest);
       } catch {
         localStorage.removeItem("accessToken");
-        localStorage.removeItem("refreshToken");
         localStorage.removeItem("user");
         window.location.href = "/login?expired=true";
         return Promise.reject(error);

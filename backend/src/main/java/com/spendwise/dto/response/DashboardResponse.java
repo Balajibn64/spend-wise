@@ -17,6 +17,7 @@ public class DashboardResponse {
     private List<CategoryBreakdown> categoryBreakdown;
     private List<MonthlyComparison> monthlyComparison;
     private List<PaymentMethodBreakdown> paymentMethodDistribution;
+    private List<DailySpending> dailySpending;
 
     @Data
     @Builder
@@ -43,5 +44,13 @@ public class DashboardResponse {
         private String method;
         private BigDecimal amount;
         private Double percentage;
+    }
+
+    @Data
+    @Builder
+    @AllArgsConstructor
+    public static class DailySpending {
+        private Integer day;
+        private BigDecimal amount;
     }
 }

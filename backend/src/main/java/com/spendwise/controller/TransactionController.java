@@ -2,9 +2,11 @@ package com.spendwise.controller;
 
 import com.spendwise.dto.request.TransactionRequest;
 import com.spendwise.dto.response.ApiResponse;
+import com.spendwise.dto.response.ImportResultResponse;
 import com.spendwise.dto.response.TransactionResponse;
 import com.spendwise.model.enums.TransactionType;
 import com.spendwise.security.UserPrincipal;
+import com.spendwise.service.TransactionImportService;
 import com.spendwise.service.TransactionService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -19,6 +21,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDate;
 import java.util.UUID;
@@ -30,6 +33,7 @@ import java.util.UUID;
 public class TransactionController {
 
     private final TransactionService transactionService;
+    private final TransactionImportService transactionImportService;
 
     @PostMapping
     @Operation(summary = "Create a new transaction")
@@ -80,5 +84,14 @@ public class TransactionController {
             @PathVariable UUID id) {
         transactionService.deleteTransaction(user.getId(), id);
         return ResponseEntity.ok(ApiResponse.success("Transaction deleted", null));
+    }
+
+    @PostMapping(value = "/import", consumes = "multipart/form-data")
+    @Operation(summary = "Import transactions from an Excel (.xlsx/.xls) file")
+    public ResponseEntity<ApiResponse<ImportResultResponse>> importExcel(
+            @AuthenticationPrincipal UserPrincipal user,
+            @RequestParam("file") MultipartFile file) {
+        ImportResultResponse result = transactionImportService.importFromExcel(user.getId(), file);
+        return ResponseEntity.ok(ApiResponse.success("Import complete", result));
     }
 }

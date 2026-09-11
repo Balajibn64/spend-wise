@@ -35,4 +35,12 @@ public class Category {
     @Column(nullable = false)
     @Builder.Default
     private Boolean isDefault = false;
+
+    /**
+     * Null for system-wide default categories; set for a category created by
+     * a specific user (e.g. via Excel import or manual creation).
+     */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "user_id")
+    private User user;
 }

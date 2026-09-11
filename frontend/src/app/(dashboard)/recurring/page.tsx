@@ -14,6 +14,8 @@ import {
   deleteRecurringTransaction,
   fetchCategories,
 } from "@/lib/queries";
+import { getApiErrorMessage } from "@/lib/api-error";
+import { formatINRCompact, todayLocalDateString } from "@/lib/format";
 import type {
   RecurringTransaction,
   RecurringTransactionRequest,
@@ -74,6 +76,8 @@ const recurringSchema = z.object({
 type RecurringFormValues = z.infer<typeof recurringSchema>;
 
 // ── Frequency colours ────────────────────────────────────────
+const VISIBLE_CAP = 24;
+
 const frequencyColor: Record<string, string> = {
   DAILY: "bg-violet-600 text-white",
   WEEKLY: "bg-purple-600 text-white",
@@ -82,12 +86,7 @@ const frequencyColor: Record<string, string> = {
 };
 
 // ── Helper: format INR ───────────────────────────────────────
-const formatINR = (amount: number) =>
-  new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    maximumFractionDigits: 0,
-  }).format(amount);
+const formatINR = formatINRCompact;
 
 // ── Helper: format date ──────────────────────────────────────
 const fmtDate = (d: string | null | undefined) =>
@@ -102,6 +101,7 @@ export default function RecurringPage() {
   const [editingTx, setEditingTx] = useState<RecurringTransaction | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
 
   // ── Queries ──────────────────────────────────────────────
   const {
@@ -126,7 +126,7 @@ export default function RecurringPage() {
       toast.success("Recurring transaction created");
       closeDialog();
     },
-    onError: () => toast.error("Failed to create recurring transaction"),
+    onError: (error) => toast.error(getApiErrorMessage(error, "Failed to create recurring transaction")),
   });
 
   const updateMutation = useMutation({
@@ -137,7 +137,7 @@ export default function RecurringPage() {
       toast.success("Recurring transaction updated");
       closeDialog();
     },
-    onError: () => toast.error("Failed to update recurring transaction"),
+    onError: (error) => toast.error(getApiErrorMessage(error, "Failed to update recurring transaction")),
   });
 
   const toggleMutation = useMutation({
@@ -146,7 +146,7 @@ export default function RecurringPage() {
       queryClient.invalidateQueries({ queryKey: ["recurring-transactions"] });
       toast.success("Status toggled");
     },
-    onError: () => toast.error("Failed to toggle status"),
+    onError: (error) => toast.error(getApiErrorMessage(error, "Failed to toggle status")),
   });
 
   const deleteMutation = useMutation({
@@ -155,7 +155,7 @@ export default function RecurringPage() {
       queryClient.invalidateQueries({ queryKey: ["recurring-transactions"] });
       toast.success("Recurring transaction deleted");
     },
-    onError: () => toast.error("Failed to delete recurring transaction"),
+    onError: (error) => toast.error(getApiErrorMessage(error, "Failed to delete recurring transaction")),
   });
 
   // ── Form ─────────────────────────────────────────────────
@@ -182,7 +182,7 @@ export default function RecurringPage() {
       paymentMethod: "UPI",
       description: "",
       frequency: "MONTHLY",
-      startDate: new Date().toISOString().slice(0, 10),
+      startDate: todayLocalDateString(),
       endDate: "",
     });
     setDialogOpen(true);
@@ -446,7 +446,7 @@ export default function RecurringPage() {
       {/* Transaction cards grid */}
       {!isLoading && !isError && transactions.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-          {transactions.map((tx) => (
+          {(showAll ? transactions : transactions.slice(0, VISIBLE_CAP)).map((tx) => (
             <Card
               key={tx.id}
               className={`relative overflow-hidden border transition-shadow hover:shadow-lg ${
@@ -560,6 +560,14 @@ export default function RecurringPage() {
               </CardFooter>
             </Card>
           ))}
+        </div>
+      )}
+
+      {!isLoading && !isError && transactions.length > VISIBLE_CAP && (
+        <div className="flex justify-center">
+          <Button variant="outline" onClick={() => setShowAll((v) => !v)}>
+            {showAll ? "Show less" : `Show all ${transactions.length}`}
+          </Button>
         </div>
       )}
 

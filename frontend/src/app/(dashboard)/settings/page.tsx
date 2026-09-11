@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useAuth } from "@/context/auth-context";
 import { useTheme } from "next-themes";
 import { exportCsv, exportPdf } from "@/lib/queries";
+import { getApiErrorMessage } from "@/lib/api-error";
 import { toast } from "sonner";
 
 import {
@@ -34,8 +35,8 @@ export default function SettingsPage() {
       setExporting("csv");
       await exportCsv(startDate || "", endDate || "");
       toast.success("CSV exported successfully");
-    } catch {
-      toast.error("Failed to export CSV");
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, "Failed to export CSV"));
     } finally {
       setExporting(null);
     }
@@ -46,8 +47,8 @@ export default function SettingsPage() {
       setExporting("pdf");
       await exportPdf(startDate || "", endDate || "");
       toast.success("PDF exported successfully");
-    } catch {
-      toast.error("Failed to export PDF");
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, "Failed to export PDF"));
     } finally {
       setExporting(null);
     }

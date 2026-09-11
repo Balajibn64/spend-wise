@@ -15,6 +15,8 @@ import {
   deleteBudget,
   fetchCategoriesByType,
 } from "@/lib/queries";
+import { getApiErrorMessage } from "@/lib/api-error";
+import { MONTHS, formatINRCompact } from "@/lib/format";
 import type { Budget, BudgetRequest, Category } from "@/types";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -42,32 +44,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 
 // ---------- constants & helpers ----------
 
-const MONTHS = [
-  "January",
-  "February",
-  "March",
-  "April",
-  "May",
-  "June",
-  "July",
-  "August",
-  "September",
-  "October",
-  "November",
-  "December",
-] as const;
-
-const currentDate = new Date();
-const currentMonth = currentDate.getMonth() + 1; // 1-indexed
-const currentYear = currentDate.getFullYear();
-
-const formatCurrency = (value: number): string =>
-  new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(value);
+const formatCurrency = formatINRCompact;
 
 function getAlertStatus(spent: number, limit: number) {
   if (limit <= 0) return "NORMAL";
@@ -128,6 +105,13 @@ type BudgetFormValues = z.infer<typeof budgetSchema>;
 export default function BudgetsPage() {
   const queryClient = useQueryClient();
 
+  // Computed fresh on every render (not once at module load) — a tab left
+  // open across midnight on the 1st would otherwise keep defaulting to the
+  // wrong month forever.
+  const now = new Date();
+  const currentMonth = now.getMonth() + 1; // 1-indexed
+  const currentYear = now.getFullYear();
+
   // month / year selector state
   const [selectedMonth, setSelectedMonth] = useState<number>(currentMonth);
   const [selectedYear, setSelectedYear] = useState<number>(currentYear);
@@ -156,17 +140,18 @@ export default function BudgetsPage() {
 
   // ---------- mutations ----------
 
+  // Invalidated by prefix (not the exact [selectedMonth, selectedYear] key)
+  // so an update that moves a budget to a different month, or any other
+  // cached month, doesn't keep showing stale data.
   const createMutation = useMutation({
     mutationFn: (data: BudgetRequest) => createBudget(data),
     onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["budgets", selectedMonth, selectedYear],
-      });
+      queryClient.invalidateQueries({ queryKey: ["budgets"] });
       toast.success("Budget created successfully");
       closeDialog();
     },
-    onError: () => {
-      toast.error("Failed to create budget");
+    onError: (error) => {
+      toast.error(getApiErrorMessage(error, "Failed to create budget"));
     },
   });
 
@@ -174,27 +159,23 @@ export default function BudgetsPage() {
     mutationFn: ({ id, data }: { id: string; data: BudgetRequest }) =>
       updateBudget(id, data),
     onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["budgets", selectedMonth, selectedYear],
-      });
+      queryClient.invalidateQueries({ queryKey: ["budgets"] });
       toast.success("Budget updated successfully");
       closeDialog();
     },
-    onError: () => {
-      toast.error("Failed to update budget");
+    onError: (error) => {
+      toast.error(getApiErrorMessage(error, "Failed to update budget"));
     },
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteBudget(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["budgets", selectedMonth, selectedYear],
-      });
+      queryClient.invalidateQueries({ queryKey: ["budgets"] });
       toast.success("Budget deleted successfully");
     },
-    onError: () => {
-      toast.error("Failed to delete budget");
+    onError: (error) => {
+      toast.error(getApiErrorMessage(error, "Failed to delete budget"));
     },
   });
 
