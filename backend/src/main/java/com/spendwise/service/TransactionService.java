@@ -13,7 +13,9 @@ import com.spendwise.repository.TransactionRepository;
 import com.spendwise.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -33,8 +35,7 @@ public class TransactionService {
     public TransactionResponse createTransaction(UUID userId, TransactionRequest request) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("User", "id", userId));
-        Category category = categoryRepository.findById(request.getCategoryId())
-                .orElseThrow(() -> new ResourceNotFoundException("Category", "id", request.getCategoryId()));
+        Category category = findOwnedCategory(userId, request.getCategoryId());
 
         validateCategoryType(category, request.getType());
 
@@ -56,33 +57,34 @@ public class TransactionService {
     public Page<TransactionResponse> getTransactions(UUID userId, TransactionType type,
                                                       Long categoryId, LocalDate startDate,
                                                       LocalDate endDate, Pageable pageable) {
-        return transactionRepository.findByFilters(userId, type, categoryId, startDate, endDate, pageable)
+        Pageable withTiebreaker = withStableTiebreaker(pageable);
+        return transactionRepository.findByFilters(userId, type, categoryId, startDate, endDate, withTiebreaker)
                 .map(TransactionResponse::from);
+    }
+
+    /**
+     * A date-only sort column produces ties across many rows, and Postgres does
+     * not guarantee stable ordering for LIMIT/OFFSET across ties — so append a
+     * unique column to make paging deterministic.
+     */
+    private Pageable withStableTiebreaker(Pageable pageable) {
+        Sort tiebreaker = Sort.by(Sort.Direction.DESC, "createdAt").and(Sort.by(Sort.Direction.DESC, "id"));
+        return PageRequest.of(pageable.getPageNumber(), pageable.getPageSize(), pageable.getSort().and(tiebreaker));
     }
 
     @Transactional(readOnly = true)
     public TransactionResponse getTransaction(UUID userId, UUID transactionId) {
-        Transaction transaction = transactionRepository.findById(transactionId)
+        Transaction transaction = transactionRepository.findByIdAndUserId(transactionId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Transaction", "id", transactionId));
-
-        if (!transaction.getUser().getId().equals(userId)) {
-            throw new ResourceNotFoundException("Transaction", "id", transactionId);
-        }
         return TransactionResponse.from(transaction);
     }
 
     @Transactional
     public TransactionResponse updateTransaction(UUID userId, UUID transactionId, TransactionRequest request) {
-        Transaction transaction = transactionRepository.findById(transactionId)
+        Transaction transaction = transactionRepository.findByIdAndUserId(transactionId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Transaction", "id", transactionId));
 
-        if (!transaction.getUser().getId().equals(userId)) {
-            throw new ResourceNotFoundException("Transaction", "id", transactionId);
-        }
-
-        Category category = categoryRepository.findById(request.getCategoryId())
-                .orElseThrow(() -> new ResourceNotFoundException("Category", "id", request.getCategoryId()));
-
+        Category category = findOwnedCategory(userId, request.getCategoryId());
         validateCategoryType(category, request.getType());
 
         transaction.setCategory(category);
@@ -98,12 +100,8 @@ public class TransactionService {
 
     @Transactional
     public void deleteTransaction(UUID userId, UUID transactionId) {
-        Transaction transaction = transactionRepository.findById(transactionId)
+        Transaction transaction = transactionRepository.findByIdAndUserId(transactionId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Transaction", "id", transactionId));
-
-        if (!transaction.getUser().getId().equals(userId)) {
-            throw new ResourceNotFoundException("Transaction", "id", transactionId);
-        }
 
         transactionRepository.delete(transaction);
     }
@@ -111,6 +109,11 @@ public class TransactionService {
     @Transactional(readOnly = true)
     public List<Transaction> getTransactionsForExport(UUID userId, LocalDate startDate, LocalDate endDate) {
         return transactionRepository.findByUserIdAndDateRange(userId, startDate, endDate);
+    }
+
+    private Category findOwnedCategory(UUID userId, Long categoryId) {
+        return categoryRepository.findByIdVisibleToUser(categoryId, userId)
+                .orElseThrow(() -> new ResourceNotFoundException("Category", "id", categoryId));
     }
 
     private void validateCategoryType(Category category, TransactionType requestType) {

@@ -6,7 +6,6 @@ export interface User {
 
 export interface AuthResponse {
   accessToken: string;
-  refreshToken: string;
   tokenType: string;
   user: User;
 }
@@ -113,6 +112,12 @@ export interface DashboardData {
   categoryBreakdown: CategoryBreakdown[];
   monthlyComparison: MonthlyComparison[];
   paymentMethodDistribution: PaymentMethodBreakdown[];
+  dailySpending: DailySpending[];
+}
+
+export interface DailySpending {
+  day: number;
+  amount: number;
 }
 
 export interface CategoryBreakdown {
@@ -131,6 +136,13 @@ export interface PaymentMethodBreakdown {
   method: string;
   amount: number;
   percentage: number;
+}
+
+export interface ImportResult {
+  imported: number;
+  skipped: number;
+  categoriesCreated: string[];
+  errors: string[];
 }
 
 export interface PageResponse<T> {

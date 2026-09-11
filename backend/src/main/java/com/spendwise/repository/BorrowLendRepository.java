@@ -10,9 +10,12 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.math.BigDecimal;
+import java.util.Optional;
 import java.util.UUID;
 
 public interface BorrowLendRepository extends JpaRepository<BorrowLend, UUID> {
+
+    Optional<BorrowLend> findByIdAndUserId(UUID id, UUID userId);
 
     @Query("SELECT bl FROM BorrowLend bl WHERE bl.user.id = :userId " +
             "AND (:type IS NULL OR bl.type = :type) " +

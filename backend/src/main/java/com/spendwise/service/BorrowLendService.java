@@ -123,13 +123,8 @@ public class BorrowLendService {
     }
 
     private BorrowLend findAndValidateOwnership(UUID userId, UUID id) {
-        BorrowLend borrowLend = borrowLendRepository.findById(id)
+        return borrowLendRepository.findByIdAndUserId(id, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("BorrowLend", "id", id));
-
-        if (!borrowLend.getUser().getId().equals(userId)) {
-            throw new ResourceNotFoundException("BorrowLend", "id", id);
-        }
-        return borrowLend;
     }
 
     private void recalculateStatus(BorrowLend borrowLend) {

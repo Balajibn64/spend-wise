@@ -11,15 +11,18 @@ import org.springframework.data.repository.query.Param;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 public interface TransactionRepository extends JpaRepository<Transaction, UUID> {
 
-    @Query("SELECT t FROM Transaction t WHERE t.user.id = :userId " +
-            "AND (:type IS NULL OR t.type = :type) " +
-            "AND (:categoryId IS NULL OR t.category.id = :categoryId) " +
-            "AND (CAST(:startDate AS localdate) IS NULL OR t.transactionDate >= :startDate) " +
-            "AND (CAST(:endDate AS localdate) IS NULL OR t.transactionDate <= :endDate)")
+    Optional<Transaction> findByIdAndUserId(UUID id, UUID userId);
+
+    @Query("SELECT t FROM Transaction t JOIN FETCH t.category WHERE t.user.id = :userId "
+            + "AND (:type IS NULL OR t.type = :type) "
+            + "AND (:categoryId IS NULL OR t.category.id = :categoryId) "
+            + "AND (CAST(:startDate AS localdate) IS NULL OR t.transactionDate >= :startDate) "
+            + "AND (CAST(:endDate AS localdate) IS NULL OR t.transactionDate <= :endDate)")
     Page<Transaction> findByFilters(
             @Param("userId") UUID userId,
             @Param("type") TransactionType type,
@@ -28,8 +31,8 @@ public interface TransactionRepository extends JpaRepository<Transaction, UUID> 
             @Param("endDate") LocalDate endDate,
             Pageable pageable);
 
-    @Query("SELECT t FROM Transaction t WHERE t.user.id = :userId " +
-            "AND t.transactionDate BETWEEN :startDate AND :endDate")
+    @Query("SELECT t FROM Transaction t JOIN FETCH t.category WHERE t.user.id = :userId "
+            + "AND t.transactionDate BETWEEN :startDate AND :endDate")
     List<Transaction> findByUserIdAndDateRange(
             @Param("userId") UUID userId,
             @Param("startDate") LocalDate startDate,
@@ -45,12 +48,31 @@ public interface TransactionRepository extends JpaRepository<Transaction, UUID> 
             @Param("endDate") LocalDate endDate);
 
     @Query("SELECT COALESCE(SUM(t.amount), 0) FROM Transaction t " +
+            "WHERE t.user.id = :userId AND t.type = :type " +
+            "AND t.transactionDate <= :endDate")
+    BigDecimal sumByUserAndTypeUpTo(
+            @Param("userId") UUID userId,
+            @Param("type") TransactionType type,
+            @Param("endDate") LocalDate endDate);
+
+    @Query("SELECT COALESCE(SUM(t.amount), 0) FROM Transaction t " +
             "WHERE t.user.id = :userId AND t.category.id = :categoryId " +
             "AND t.type = :type " +
             "AND t.transactionDate BETWEEN :startDate AND :endDate")
     BigDecimal sumByUserAndCategoryAndDateRange(
             @Param("userId") UUID userId,
             @Param("categoryId") Long categoryId,
+            @Param("type") TransactionType type,
+            @Param("startDate") LocalDate startDate,
+            @Param("endDate") LocalDate endDate);
+
+    /** Expense total per category for a user/date-range, in one query (used by the budgets list). */
+    @Query("SELECT t.category.id, COALESCE(SUM(t.amount), 0) FROM Transaction t " +
+            "WHERE t.user.id = :userId AND t.type = :type " +
+            "AND t.transactionDate BETWEEN :startDate AND :endDate " +
+            "GROUP BY t.category.id")
+    List<Object[]> sumByUserAndTypeAndDateRangeGroupedByCategory(
+            @Param("userId") UUID userId,
             @Param("type") TransactionType type,
             @Param("startDate") LocalDate startDate,
             @Param("endDate") LocalDate endDate);
@@ -80,6 +102,16 @@ public interface TransactionRepository extends JpaRepository<Transaction, UUID> 
             "AND t.transactionDate BETWEEN :startDate AND :endDate " +
             "GROUP BY t.paymentMethod")
     List<Object[]> getPaymentMethodDistribution(
+            @Param("userId") UUID userId,
+            @Param("type") TransactionType type,
+            @Param("startDate") LocalDate startDate,
+            @Param("endDate") LocalDate endDate);
+
+    @Query("SELECT EXTRACT(DAY FROM t.transactionDate), SUM(t.amount) FROM Transaction t " +
+            "WHERE t.user.id = :userId AND t.type = :type " +
+            "AND t.transactionDate BETWEEN :startDate AND :endDate " +
+            "GROUP BY EXTRACT(DAY FROM t.transactionDate)")
+    List<Object[]> getDailyTotals(
             @Param("userId") UUID userId,
             @Param("type") TransactionType type,
             @Param("startDate") LocalDate startDate,

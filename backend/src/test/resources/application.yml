@@ -1,0 +1,31 @@
+# Test-only configuration. Points at a dedicated local "spendwise_test"
+# database (never the dev "spendwise" one) so `mvn test` is safe to run
+# without touching real data. Flyway runs the same migrations as production
+# against it, so these tests also verify the migrations themselves.
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/spendwise_test
+    username: postgres
+    password: root
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+  flyway:
+    enabled: true
+    clean-disabled: false
+
+  jackson:
+    time-zone: Asia/Kolkata
+
+app:
+  jwt:
+    secret: test-only-secret-not-used-anywhere-else-32-bytes-min
+    access-token-expiration: 900000
+    refresh-token-expiration: 604800000

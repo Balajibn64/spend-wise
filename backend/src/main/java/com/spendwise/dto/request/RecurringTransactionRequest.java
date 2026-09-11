@@ -12,6 +12,11 @@ import java.time.LocalDate;
 @Data
 public class RecurringTransactionRequest {
 
+    @AssertTrue(message = "End date must not be before the start date")
+    private boolean isEndDateValid() {
+        return endDate == null || startDate == null || !endDate.isBefore(startDate);
+    }
+
     @NotNull(message = "Category ID is required")
     private Long categoryId;
 

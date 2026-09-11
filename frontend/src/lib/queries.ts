@@ -1,3 +1,4 @@
+import type { QueryClient } from "@tanstack/react-query";
 import api from "./api";
 import type {
   ApiResponse,
@@ -10,6 +11,7 @@ import type {
   BudgetRequest,
   Category,
   DashboardData,
+  ImportResult,
   PageResponse,
   RecurringTransaction,
   RecurringTransactionRequest,
@@ -17,6 +19,19 @@ import type {
   TransactionRequest,
   TransactionType,
 } from "@/types";
+
+/**
+ * A transaction write changes the dashboard totals, category breakdown, and
+ * every budget's spent figure — not just the transactions list. Call this
+ * from every transaction create/update/delete mutation's onSuccess instead
+ * of invalidating just ["transactions"], which used to leave the dashboard
+ * and budgets pages showing stale numbers until a manual refresh.
+ */
+export function invalidateAfterTransactionChange(queryClient: QueryClient) {
+  queryClient.invalidateQueries({ queryKey: ["transactions"] });
+  queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+  queryClient.invalidateQueries({ queryKey: ["budgets"] });
+}
 
 // Categories
 export const fetchCategories = async () => {
@@ -69,6 +84,17 @@ export const updateTransaction = async (
 
 export const deleteTransaction = async (id: string) => {
   await api.delete(`/api/transactions/${id}`);
+};
+
+export const importTransactions = async (file: File) => {
+  const formData = new FormData();
+  formData.append("file", file);
+  const { data } = await api.post<ApiResponse<ImportResult>>(
+    "/api/transactions/import",
+    formData,
+    { headers: { "Content-Type": undefined } }
+  );
+  return data.data;
 };
 
 // Budgets

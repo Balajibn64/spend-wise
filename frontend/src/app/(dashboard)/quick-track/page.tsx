@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo, useRef } from "react";
+import dynamic from "next/dynamic";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -22,17 +23,6 @@ import {
   HandCoins,
 } from "lucide-react";
 import {
-  BarChart,
-  Bar,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Cell,
-} from "recharts";
-
-import {
   fetchTransactions,
   createTransaction,
   updateTransaction,
@@ -42,7 +32,19 @@ import {
   createBorrowLend,
   fetchBorrowLends,
   settleBorrowLend,
+  invalidateAfterTransactionChange,
 } from "@/lib/queries";
+import { getApiErrorMessage } from "@/lib/api-error";
+import {
+  PAYMENT_METHODS,
+  PAYMENT_METHOD_LABELS,
+  MONTHS,
+  SHORT_MONTHS,
+  formatINR,
+  formatINRCompact,
+  formatDate,
+  todayLocalDateString,
+} from "@/lib/format";
 import type {
   Transaction,
   TransactionRequest,
@@ -75,86 +77,70 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 
-// ── Constants ────────────────────────────────────────────────
+const DailySpendingChart = dynamic(
+  () => import("@/components/charts/daily-spending-chart"),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex items-center justify-center h-[200px]">
+        <div className="h-6 w-6 animate-spin rounded-full border-3 border-violet-300 border-t-violet-600" />
+      </div>
+    ),
+  }
+);
 
-const PAYMENT_METHODS: PaymentMethod[] = [
-  "CASH",
-  "UPI",
-  "DEBIT_CARD",
-  "CREDIT_CARD",
-  "NET_BANKING",
-  "WALLET",
-];
+// ── Helpers (page-specific) ───────────────────────────────────
 
-const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
-  CASH: "Cash",
-  UPI: "UPI",
-  DEBIT_CARD: "Debit Card",
-  CREDIT_CARD: "Credit Card",
-  NET_BANKING: "Net Banking",
-  WALLET: "Wallet",
-};
-
-const MONTHS = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
-];
-
-// ── Helpers ──────────────────────────────────────────────────
-
-function formatINR(value: number): string {
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    maximumFractionDigits: 2,
-  }).format(value);
-}
-
-function formatINRCompact(value: number): string {
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(value);
-}
-
-function formatDate(dateStr: string): string {
-  return new Date(dateStr).toLocaleDateString("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
-}
-
-function getTodayString(): string {
-  return new Date().toISOString().split("T")[0];
-}
-
-/** Safely evaluate a simple math expression (supports + - * /) */
+/**
+ * Safely evaluate a simple math expression (+ - * /), respecting the usual
+ * precedence — `*` and `/` bind tighter than `+` and `-`. Parentheses aren't
+ * supported: the old version accepted them in its character whitelist but
+ * the tokenizer silently dropped them, so `2*(3+4)` quietly evaluated to 10
+ * instead of 14. Rejecting them outright (as invalid input, same as any
+ * other unsupported syntax) is safer than silently computing the wrong
+ * number in a field that saves straight to a ledger.
+ */
 function evalExpr(expr: string): number | null {
   const cleaned = expr.replace(/\s/g, "");
   if (!cleaned) return null;
-  // Only allow digits, decimal points, and operators
-  if (!/^[\d.+\-*/()]+$/.test(cleaned)) return null;
+  // Only allow digits, decimal points, and the four operators — no parens.
+  if (!/^[\d.+\-*/]+$/.test(cleaned)) return null;
   // Must start and end with a digit
   if (!/^\d/.test(cleaned) || !/\d$/.test(cleaned)) return null;
   try {
-    // Split into tokens and evaluate step by step
     const tokens = cleaned.match(/(\d+\.?\d*|[+\-*/])/g);
     if (!tokens) return null;
-    let result = parseFloat(tokens[0]);
-    if (isNaN(result)) return null;
+
+    // Pass 1: fold `*` and `/` into running terms (higher precedence).
+    const firstTerm = parseFloat(tokens[0]);
+    if (isNaN(firstTerm)) return null;
+    const terms: number[] = [firstTerm];
+    const addSubOps: string[] = [];
+
     for (let i = 1; i < tokens.length; i += 2) {
       const op = tokens[i];
       const num = parseFloat(tokens[i + 1]);
       if (isNaN(num)) return null;
-      if (op === "+") result += num;
-      else if (op === "-") result -= num;
-      else if (op === "*") result *= num;
-      else if (op === "/") result = num !== 0 ? result / num : NaN;
-      else return null;
+
+      if (op === "*") {
+        terms[terms.length - 1] *= num;
+      } else if (op === "/") {
+        if (num === 0) return null;
+        terms[terms.length - 1] /= num;
+      } else if (op === "+" || op === "-") {
+        addSubOps.push(op);
+        terms.push(num);
+      } else {
+        return null;
+      }
     }
+
+    // Pass 2: apply `+` and `-` left to right across the resolved terms.
+    let result = terms[0];
+    for (let i = 0; i < addSubOps.length; i++) {
+      result = addSubOps[i] === "+" ? result + terms[i + 1] : result - terms[i + 1];
+    }
+
     return isNaN(result) || !isFinite(result) ? null : Math.round(result * 100) / 100;
   } catch {
     return null;
@@ -168,11 +154,6 @@ function hasOperator(expr: string): boolean {
 function buildDateStr(year: number, month: number, day: number): string {
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
-
-const SHORT_MONTHS = [
-  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
 
 // ── Zod Schema ───────────────────────────────────────────────
 
@@ -231,7 +212,7 @@ function QuickDatePicker({
 
   const yesterdayDate = new Date();
   yesterdayDate.setDate(yesterdayDate.getDate() - 1);
-  const yesterdayStr = yesterdayDate.toISOString().split("T")[0];
+  const yesterdayStr = yesterdayDate.toLocaleDateString("en-CA");
   const showYesterday = isCurrentMonth || (yesterdayDate.getMonth() + 1 === selectedMonth && yesterdayDate.getFullYear() === selectedYear);
 
   return (
@@ -324,7 +305,7 @@ export default function QuickTrackPage() {
   const queryClient = useQueryClient();
 
   const today = new Date();
-  const todayStr = getTodayString();
+  const todayStr = todayLocalDateString();
   const actualMonth = today.getMonth() + 1;
   const actualYear = today.getFullYear();
 
@@ -377,15 +358,38 @@ export default function QuickTrackPage() {
 
   // ── Queries ────────────────────────────────────────────────
 
-  const monthlyTxnQuery = useQuery({
-    queryKey: ["transactions", "month", selectedMonth, selectedYear],
+  const recentTxnQuery = useQuery({
+    queryKey: ["transactions", "recent", selectedMonth, selectedYear],
     queryFn: () =>
       fetchTransactions({
         startDate: firstOfMonth,
         endDate: lastOfMonth,
-        size: 500,
+        size: 15,
         sort: "transactionDate,desc",
       }),
+  });
+
+  const todayTxnQuery = useQuery({
+    queryKey: ["transactions", "today", todayStr],
+    queryFn: () =>
+      fetchTransactions({
+        startDate: todayStr,
+        endDate: todayStr,
+        size: 200,
+        sort: "transactionDate,desc",
+      }),
+    enabled: isCurrentMonth,
+  });
+
+  const monthCountQuery = useQuery({
+    queryKey: ["transactions", "count", selectedMonth, selectedYear],
+    queryFn: () =>
+      fetchTransactions({
+        startDate: firstOfMonth,
+        endDate: lastOfMonth,
+        size: 1,
+      }),
+    enabled: !isCurrentMonth,
   });
 
   const dashboardQuery = useQuery({
@@ -414,10 +418,6 @@ export default function QuickTrackPage() {
 
   const watchedType = form.watch("type");
 
-  useEffect(() => {
-    form.setValue("categoryId", "");
-  }, [watchedType, form]);
-
   // ── Edit Form ──────────────────────────────────────────────
 
   const editForm = useForm<QuickAddFormValues>({
@@ -434,10 +434,6 @@ export default function QuickTrackPage() {
 
   const editWatchedType = editForm.watch("type");
 
-  useEffect(() => {
-    editForm.setValue("categoryId", "");
-  }, [editWatchedType, editForm]);
-
   // ── Mutations ──────────────────────────────────────────────
 
   const createMutation = useMutation({
@@ -449,69 +445,72 @@ export default function QuickTrackPage() {
       updateTransaction(id, data),
     onSuccess: () => {
       toast.success("Transaction updated");
-      queryClient.invalidateQueries({ queryKey: ["transactions"] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      invalidateAfterTransactionChange(queryClient);
       setEditDialogOpen(false);
       setEditingTxn(null);
     },
-    onError: () => toast.error("Failed to update transaction"),
+    onError: (error) => toast.error(getApiErrorMessage(error, "Failed to update transaction")),
   });
 
   const deleteMutation = useMutation({
     mutationFn: deleteTransaction,
     onSuccess: () => {
       toast.success("Transaction deleted");
-      queryClient.invalidateQueries({ queryKey: ["transactions"] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      invalidateAfterTransactionChange(queryClient);
     },
-    onError: () => toast.error("Failed to delete transaction"),
+    onError: (error) => toast.error(getApiErrorMessage(error, "Failed to delete transaction")),
   });
 
   // ── Derived Data ───────────────────────────────────────────
 
-  const allMonthTxns: Transaction[] = monthlyTxnQuery.data?.content ?? [];
-
-  const todayTxns = useMemo(
-    () => allMonthTxns.filter((t) => t.transactionDate?.startsWith(todayStr)),
-    [allMonthTxns, todayStr]
-  );
-
-  const summaryTxns = isCurrentMonth ? todayTxns : allMonthTxns;
   const summaryLabel = isCurrentMonth ? "Today's" : MONTHS[selectedMonth - 1];
 
   const todaySummary = useMemo(() => {
-    const income = summaryTxns
-      .filter((t) => t.type === "INCOME")
-      .reduce((sum, t) => sum + t.amount, 0);
-    const expense = summaryTxns
-      .filter((t) => t.type === "EXPENSE")
-      .reduce((sum, t) => sum + t.amount, 0);
-    return { income, expense, net: income - expense, count: summaryTxns.length };
-  }, [summaryTxns]);
+    if (isCurrentMonth) {
+      const todayTxns = todayTxnQuery.data?.content ?? [];
+      const income = todayTxns
+        .filter((t) => t.type === "INCOME")
+        .reduce((sum, t) => sum + t.amount, 0);
+      const expense = todayTxns
+        .filter((t) => t.type === "EXPENSE")
+        .reduce((sum, t) => sum + t.amount, 0);
+      return {
+        income,
+        expense,
+        net: income - expense,
+        count: todayTxnQuery.data?.totalElements ?? todayTxns.length,
+      };
+    }
+    const income = dashboardQuery.data?.totalIncome ?? 0;
+    const expense = dashboardQuery.data?.totalExpense ?? 0;
+    return {
+      income,
+      expense,
+      net: income - expense,
+      count: monthCountQuery.data?.totalElements ?? 0,
+    };
+  }, [isCurrentMonth, todayTxnQuery.data, dashboardQuery.data, monthCountQuery.data]);
 
-  const recentTxns = useMemo(() => allMonthTxns.slice(0, 15), [allMonthTxns]);
+  const recentTxns: Transaction[] = recentTxnQuery.data?.content ?? [];
 
-  const dailySpendingData = useMemo(() => {
-    const map = new Map<number, number>();
-    for (let d = 1; d <= daysInMonth; d++) map.set(d, 0);
-    allMonthTxns
-      .filter((t) => t.type === "EXPENSE")
-      .forEach((t) => {
-        const day = new Date(t.transactionDate).getDate();
-        if (map.has(day)) map.set(day, (map.get(day) ?? 0) + t.amount);
-      });
-    return Array.from(map.entries())
-      .map(([day, amount]) => ({ day: String(day), amount }))
-      .sort((a, b) => Number(a.day) - Number(b.day));
-  }, [allMonthTxns, daysInMonth]);
-
-  const filteredCategories: Category[] = (categoriesQuery.data ?? []).filter(
-    (c: Category) => c.type === watchedType
+  const dailySpendingData = useMemo(
+    () =>
+      (dashboardQuery.data?.dailySpending ?? []).map((d) => ({
+        day: String(d.day),
+        amount: d.amount,
+      })),
+    [dashboardQuery.data?.dailySpending]
   );
 
-  const editFilteredCategories: Category[] = (
-    categoriesQuery.data ?? []
-  ).filter((c: Category) => c.type === editWatchedType);
+  const filteredCategories: Category[] = useMemo(
+    () => (categoriesQuery.data ?? []).filter((c: Category) => c.type === watchedType),
+    [categoriesQuery.data, watchedType]
+  );
+
+  const editFilteredCategories: Category[] = useMemo(
+    () => (categoriesQuery.data ?? []).filter((c: Category) => c.type === editWatchedType),
+    [categoriesQuery.data, editWatchedType]
+  );
 
   // ── Handlers ───────────────────────────────────────────────
 
@@ -577,8 +576,7 @@ export default function QuickTrackPage() {
       }
 
       // ── Invalidate & reset ───────────────────────────────
-      queryClient.invalidateQueries({ queryKey: ["transactions"] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      invalidateAfterTransactionChange(queryClient);
       queryClient.invalidateQueries({ queryKey: ["borrow-lend"] });
       queryClient.invalidateQueries({ queryKey: ["borrow-lend-summary"] });
 
@@ -596,8 +594,8 @@ export default function QuickTrackPage() {
       setReturnPerson("");
       setIsSpentFor(false);
       setSpentForPerson("");
-    } catch {
-      toast.error("Failed to add transaction");
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, "Failed to add transaction"));
     }
   }
 
@@ -609,7 +607,7 @@ export default function QuickTrackPage() {
       amount: txn.amount,
       paymentMethod: txn.paymentMethod,
       description: txn.description ?? "",
-      transactionDate: txn.transactionDate?.split("T")[0] ?? getTodayString(),
+      transactionDate: txn.transactionDate?.split("T")[0] ?? todayLocalDateString(),
     });
     setEditDialogOpen(true);
   }
@@ -639,30 +637,6 @@ export default function QuickTrackPage() {
     setDeleteConfirmOpen(false);
     setDeletingId(null);
   }
-
-  // ── Custom Tooltip ─────────────────────────────────────────
-
-  const ChartTooltip = ({
-    active,
-    payload,
-    label,
-  }: {
-    active?: boolean;
-    payload?: Array<{ value: number }>;
-    label?: string;
-  }) => {
-    if (active && payload?.length) {
-      return (
-        <div className="rounded-lg border border-violet-200 dark:border-violet-700 bg-white dark:bg-gray-900 px-3 py-2 shadow-xl">
-          <p className="text-xs text-muted-foreground">Day {label}</p>
-          <p className="text-sm font-semibold text-violet-700 dark:text-violet-300">
-            {formatINR(payload[0].value)}
-          </p>
-        </div>
-      );
-    }
-    return null;
-  };
 
   // ── Render ─────────────────────────────────────────────────
 
@@ -726,6 +700,7 @@ export default function QuickTrackPage() {
                 <button
                   type="button"
                   onClick={() => {
+                    if (watchedType !== "EXPENSE") form.setValue("categoryId", "");
                     form.setValue("type", "EXPENSE", { shouldValidate: true });
                     setIsReturn(false);
                     setIsSpentFor(false);
@@ -742,6 +717,7 @@ export default function QuickTrackPage() {
                 <button
                   type="button"
                   onClick={() => {
+                    if (watchedType !== "EXPENSE") form.setValue("categoryId", "");
                     form.setValue("type", "EXPENSE", { shouldValidate: true });
                     setIsSpentFor(true);
                     setIsReturn(false);
@@ -759,6 +735,7 @@ export default function QuickTrackPage() {
                 <button
                   type="button"
                   onClick={() => {
+                    if (watchedType !== "INCOME") form.setValue("categoryId", "");
                     form.setValue("type", "INCOME", { shouldValidate: true });
                     setIsReturn(false);
                     setIsSpentFor(false);
@@ -775,6 +752,7 @@ export default function QuickTrackPage() {
                 <button
                   type="button"
                   onClick={() => {
+                    if (watchedType !== "INCOME") form.setValue("categoryId", "");
                     form.setValue("type", "INCOME", { shouldValidate: true });
                     setIsReturn(true);
                     setIsSpentFor(false);
@@ -1020,7 +998,7 @@ export default function QuickTrackPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {monthlyTxnQuery.isLoading ? (
+            {recentTxnQuery.isLoading ? (
               <div className="flex items-center justify-center py-12">
                 <div className="h-8 w-8 animate-spin rounded-full border-4 border-violet-300 border-t-violet-600" />
               </div>
@@ -1165,7 +1143,7 @@ export default function QuickTrackPage() {
                   <Separator />
                   <div className="flex justify-between items-center">
                     <span className="text-sm font-medium text-violet-900 dark:text-violet-200">
-                      Balance
+                      Total Balance
                     </span>
                     <span className="text-base font-bold text-violet-600 dark:text-violet-400">
                       {formatINRCompact(dashboardQuery.data?.balance ?? 0)}
@@ -1216,7 +1194,7 @@ export default function QuickTrackPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {monthlyTxnQuery.isLoading ? (
+              {dashboardQuery.isLoading ? (
                 <div className="flex items-center justify-center h-[200px]">
                   <div className="h-6 w-6 animate-spin rounded-full border-3 border-violet-300 border-t-violet-600" />
                 </div>
@@ -1225,47 +1203,10 @@ export default function QuickTrackPage() {
                   <p className="text-sm text-muted-foreground">No spending data yet</p>
                 </div>
               ) : (
-                <ResponsiveContainer width="100%" height={200}>
-                  <BarChart data={dailySpendingData}>
-                    <CartesianGrid
-                      strokeDasharray="3 3"
-                      className="[&>line]:stroke-gray-200 dark:[&>line]:stroke-white/5"
-                      stroke="currentColor"
-                    />
-                    <XAxis
-                      dataKey="day"
-                      tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }}
-                      axisLine={{ stroke: "hsl(var(--border))" }}
-                      tickLine={false}
-                      interval={2}
-                    />
-                    <YAxis
-                      tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }}
-                      axisLine={{ stroke: "hsl(var(--border))" }}
-                      tickLine={false}
-                      width={50}
-                      tickFormatter={(v: number) =>
-                        new Intl.NumberFormat("en-IN", {
-                          notation: "compact",
-                          compactDisplay: "short",
-                        }).format(v)
-                      }
-                    />
-                    <Tooltip content={<ChartTooltip />} />
-                    <Bar dataKey="amount" radius={[4, 4, 0, 0]} maxBarSize={14}>
-                      {dailySpendingData.map((entry, index) => (
-                        <Cell
-                          key={index}
-                          fill={
-                            isCurrentMonth && entry.day === String(today.getDate())
-                              ? "#7C3AED"
-                              : "#C4B5FD"
-                          }
-                        />
-                      ))}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
+                <DailySpendingChart
+                  data={dailySpendingData}
+                  highlightDay={isCurrentMonth ? String(today.getDate()) : null}
+                />
               )}
             </CardContent>
           </Card>
@@ -1294,7 +1235,15 @@ export default function QuickTrackPage() {
                 control={editForm.control}
                 name="type"
                 render={({ field }) => (
-                  <Select value={field.value} onValueChange={field.onChange}>
+                  <Select
+                    value={field.value}
+                    onValueChange={(val) => {
+                      field.onChange(val);
+                      // The category list depends on type, so a category
+                      // picked under the old type would no longer be valid.
+                      editForm.setValue("categoryId", "");
+                    }}
+                  >
                     <SelectTrigger className="border-violet-200 dark:border-violet-700 focus:ring-violet-500">
                       <SelectValue placeholder="Select type" />
                     </SelectTrigger>
